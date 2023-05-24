@@ -108,6 +108,6 @@ enum class Language(val prefix: String) {
 
 val LANGUAGES = Language.values().toList()
 
-fun main() {
-    EventFeed("2019-event-feed-final.json")
+fun main(args: Array<String>) {
+    EventFeed(args[0])
 }
