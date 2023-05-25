@@ -6,200 +6,197 @@ import kotlin.collections.ArrayList
 import kotlin.collections.HashMap
 import kotlin.math.*
 
-val TEAMS_NAME_FILE = "icpc-teams-name.csv"
-val LANGS_SUBMITTED_FILE = "icpc-langs-submitted.csv"
-val LANGS_ACCEPTED_FILE = "icpc-langs-accepted.csv"
+const val CONTEST_TIMEZONE = "Asia/Dhaka"
+const val RESULT_DIR = "result"
 
-val PREF = "tool_data."
-val SUFF = ".txt"
+// OUTPUT FILES (INPUT FILES ARE GIVEN IN THE PROGRAM ARGS)
+const val UNIDENTIFIED_TOOLS_FILE = "icpc-unidentified-tools.txt"
+const val UNEXPECTED_SUBMISSION_TOOLS_FILE = "icpc-unexpected-submission-tools.txt"
+const val TOOLS_FILE = "icpc-tools.csv"
+const val TEAMS_TIME_FILE = "icpc-teams-time.csv"
+const val TEAMS_NAME_FILE = "icpc-teams-name.csv"
+const val LANGS_SUBMITTED_FILE = "icpc-langs-submitted.csv"
+const val LANGS_ACCEPTED_FILE = "icpc-langs-accepted.csv"
+
+const val PREF = "ps.team"
+const val SUFF = ".txt"
 val WS = Regex("\\s+")
 
-val INTERVAL = 5 * 60 // 5 min
+val INTERVAL = 10 * 60 // 10 min
 
-val CMD_DROP_PREFIXES = listOf("/bin/sh", "/bin/bash", "sh", "bash")
-
-enum class Tool(vararg val paths: String) {
-    CLion("/opt/clion", "/usr/bin/clion", "clion"),
-    Idea("/usr/lib/idea", "idea"),
-    Pycharm("/usr/lib/pycharm", "pycharm"),
-    Eclipse("/usr/lib/eclipse", "/usr/bin/java -Dosgi.requiredJavaVersion=1.8", "eclipse"),
-    CodeBlocks("/usr/bin/codeblocks", "codeblocks"),
+enum class Tool(vararg val paths: String, val languages: List<Language> = LANGUAGES) {
+    CLion("/opt/clion", "/usr/bin/clion", "clion", languages = listOf(Language.C)),
+    Idea("/usr/lib/idea", "idea", languages = listOf(Language.Java, Language.Kotlin)),
+    Pycharm("/usr/lib/pycharm", "pycharm", languages = listOf(Language.Python)),
+    Eclipse("/usr/lib/eclipse", "/usr/bin/java -Dosgi.requiredJavaVersion=1.8", "eclipse", languages = listOf(Language.Java)),
+    CodeBlocks("/usr/bin/codeblocks", "codeblocks", languages = listOf(Language.C)),
     Geany("/usr/bin/geany", "geany"),
     Emacs("/usr/bin/emacs", "emacs"),
     GEdit("/usr/bin/gedit", "gedit"),
     Vim("/usr/bin/vim", "vim", "gvim"),
     Vi("/usr/bin/vi", "vi"),
-    VSCode("/usr/share/code", "/usr/bin/code", "vscode"),
-// --- Not actually used anymore: --
-//    Kate("/usr/bin/kate", "kate"),
-//    Nano("nano"),
-    Unknown // must be last
+    VSCode("/usr/share/code", "/usr/bin/code", "vscode", languages = listOf(Language.C, Language.Java, Language.Python)),
+    Kate("/usr/bin/kate", "kate"),
+    Nano("nano"),
+    Unknown(languages = emptyList()) // must be last
 }
 
 val TOOLS = Tool.values().filter { it != Tool.Unknown }
 val TOOLS_WITH_UNKNOWN = Tool.values().toList()
 
-class Usage(val time: Long, val tool: Tool, val cpu: Double)
+class Usage(val time: Long, val team: String, val tool: Tool, val cpu: Double)
 
-data class TeamComputer(val team: String, val computer: Char) {
-    override fun toString(): String = team + computer
-}
-
-fun ZipEntry.teamComputerOrNull(): TeamComputer? {
-    val n = name.substring(name.lastIndexOf('/') + 1)
-    return if (n.startsWith(PREF) && n.endsWith(SUFF)) {
-        val tc = n.substring(PREF.length, n.length - SUFF.length)
-        TeamComputer(tc.dropLast(1).padStart(3, '0'), tc.last())
-    } else null
-}
+fun String.teamIdOrNull() =
+    substringAfterLast("/").
+    takeIf { it.startsWith(PREF) && it.endsWith(SUFF) }
+    ?.removeSurrounding(PREF, SUFF)
 
 fun main(args: Array<String>) {
     if (args.size != 2) {
         println("Usage: Analyze <event-feed-json> <tool-backup-zip>")
         println(" <event-feed-json> -- JSON file with event feed")
-        println(" <tool-backup-zip> -- ZIP file with 'tool_data.<team>[abc].txt' files")
+        println(" <tool-backup-zip> -- ZIP file with 'ps.team<team>.txt' files")
         return
     }
     val eventFeedFile = args[0]
     val toolBackupFile = args[1]
 
-    val teamComputerUsage = LinkedHashMap<TeamComputer, ArrayList<Usage>>()
-
+    val eventFeed = EventFeed(eventFeedFile)
     val zipFile = ZipFile(toolBackupFile)
-    val groupedEntries = zipFile.entries().toList()
+
+    val teamEntries = zipFile.entries().toList()
         .filter { ze -> !ze.isDirectory }
-        .sortedBy { ze -> ze.name }
-        .mapNotNull { ze -> ze.teamComputerOrNull()?.let { it to ze!! } }
-        .groupBy({ it.first }, { it.second })
-        .toList()
-        .sortedBy { it.first.computer }
-        .sortedBy { it.first.team }
-    val unknownCommands = TreeMap<String, String>()
-    val foundToolUsage = HashSet<Tool>()
-    for ((tc, entries) in groupedEntries) {
+        .mapNotNull { ze: ZipEntry -> ze.name.teamIdOrNull()?.let { it to ze } }
+        .filter { eventFeed.teams[it.first] != null }
+        .sortedBy { it.first.teamIdSortKey() }
+    val teams = teamEntries.map { it.first }
+    val usage = ArrayList<Usage>()
+    val unidentifiedToolCmds = HashSet<String>()
+    val toolCpu = DoubleArray(TOOLS.size)
+    val allTimes = ArrayList<Long>()
+
+    println("Found ${teamEntries.size} team ps files")
+
+    for ((team, zipEntry) in teamEntries) {
+        println("Parsing ${zipEntry.name}")
+
         var time = 0L
-//        teams += team
-        val usage = ArrayList<Usage>()
-        teamComputerUsage[tc] = usage
-        val toolCpu = DoubleArray(TOOLS.size)
 
         fun flushUsage() {
+            if (time == 0L) return
+            allTimes += time
             for (tool in TOOLS) {
                 val value = toolCpu[tool.ordinal]
                 if (value != 0.0) {
-                    usage += Usage(time, tool, value)
+                    usage += Usage(time, team, tool, value)
                     toolCpu[tool.ordinal] = 0.0
                 }
             }
         }
 
-        println("Parsing $tc")
-        for (ze in entries) {
-            zipFile.getInputStream(ze).bufferedReader().useLines { lines ->
-                for (line in lines) {
-                    val curTime = line.toLongOrNull()
-                    if (curTime != null) {
-                        flushUsage()
-                        time = curTime
-                        continue
-                    }
-                    // USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
-                    // 0    1   2    3    4   5   6   7    8     9    10
-                    val tokens = line.split(WS, 11)
-                    val cmdRaw = tokens.getOrNull(10) ?: continue
-                    val cmd = cmdRaw.split(" ")
-                        .dropWhile { it in CMD_DROP_PREFIXES }
-                        .takeWhile { part ->
-                            !part.startsWith("/home") &&
-                            !part.startsWith("/tmp") &&
-                            !part.startsWith("/var/tmp") &&
-                            !part.startsWith("/run/user") &&
-                            !part.startsWith("--field-trial-handle=") &&
-                            !part.startsWith("./")
-                        }
-                        .joinToString(" ")
-                        .takeIf { it.isNotEmpty() } ?: continue
-                    val tool = TOOLS.firstOrNull { it.paths.any { cmd.startsWith(it) } }
-                    if (tool == null) {
-                        if (cmd !in unknownCommands) unknownCommands[cmd] = ze.name
-                    } else {
-                        if (foundToolUsage.add(tool)) println("Found tool usage: $tool")
-                        val cpu = tokens[2].toDoubleOrNull() ?: continue
-                        toolCpu[tool.ordinal] =
-                            max(toolCpu[tool.ordinal] + cpu, 0.01) // make it always non-zero on usage
-                    }
-                }
+        zipFile.getInputStream(zipEntry).reader().forEachLine { line ->
+            line.toLongOrNull()?.let { t ->
+                flushUsage()
+                time = t
+                return@forEachLine
             }
+            // USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+            // 0    1   2    3    4   5   6   7    8     9    10
+            val tokens = line.split(WS, 11)
+            val user = tokens[0]
+            if (user != "team$team") return@forEachLine
+            val cmd = tokens.getOrNull(10) ?: return@forEachLine
+            val tool = TOOLS.firstOrNull { it.paths.any { cmd.startsWith(it) } } ?: run {
+                unidentifiedToolCmds += cmd
+                return@forEachLine
+            }
+            val cpu = tokens[2].toDoubleOrNull() ?: return@forEachLine
+            toolCpu[tool.ordinal] = max(toolCpu[tool.ordinal] + cpu, 0.01) // make it always non-zero on usage
         }
         flushUsage()
     }
+    println("Parsed ps files for ${teamEntries.size} teams")
+    println("Found ps data in time range (seconds from epoch):")
+    println("  Min: ${allTimes.min()}")
+    println("  Max: ${allTimes.max()}")
 
-    // dump all unknown commands seen
+    // ---------------------------- OUTPUT ----------------------------
+
+    File(RESULT_DIR).mkdirs()
+
+    // unidentified tools
     scope {
-        val cmdOut = writeFile("icpc-unknown-command-lines.csv")
-        cmdOut.println("CMD,FILE")
-        for ((cmd, file) in unknownCommands) {
-            cmdOut.println("$cmd,$file")
+        val out = writeFile(UNIDENTIFIED_TOOLS_FILE)
+        unidentifiedToolCmds.sorted().forEach { cmd ->
+            out.println(cmd)
         }
     }
 
-    // write
-    val intervalTeamComputerTopTool = mutableMapOf<Long, Map<TeamComputer, Tool>>()
-    val teamComputers = teamComputerUsage.keys
+    // sort usage
+    usage.sortBy { it.time }
+
+    // write usage
+    val timeFormat = SimpleDateFormat("HH:mm").apply {
+        timeZone = TimeZone.getTimeZone(CONTEST_TIMEZONE)
+    }
+    val intervalTeamTopTool = mutableMapOf<Long, Map<String, Tool>>()
     scope {
-        val toolsOut = writeFile("icpc-tools.csv")
-        val teamsOut = writeFile("icpc-team-computers-time.csv")
+        val toolsOut = writeFile(TOOLS_FILE)
+        val teamsOut = writeFile(TEAMS_TIME_FILE)
         toolsOut.println("TIME,${TOOLS.joinToString(",")}")
-        teamsOut.println("TIME,${teamComputers.joinToString(",")}")
-        var curInterval = 0L
-        val teamTools = HashMap<TeamComputer, DoubleArray>()
+        teamsOut.println("TIME,${teams.joinToString(",")}")
+        var cur = 0L
+        val teamTools = HashMap<String, DoubleArray>()
 
         fun flushInterval() {
+            if (cur == 0L) return
             val topTool = teamTools.mapNotNull { e ->
-                val i = e.value.withIndex().maxBy { it.value }!!
+                val i = e.value.withIndex().maxBy { it.value }
                 e.value.fill(0.0)
                 if (i.value == 0.0) null else e.key to TOOLS[i.index]
             }.toMap()
-            intervalTeamComputerTopTool[curInterval] = topTool
+            intervalTeamTopTool[cur] = topTool
             val counts = topTool.values.groupingBy { it }.eachCount()
             if (counts.isEmpty()) return
-            val time = SimpleDateFormat("HH:mm").format(curInterval * INTERVAL * 1000)
+            val time = timeFormat.format(cur * INTERVAL * 1000)
             toolsOut.println("$time,${TOOLS.joinToString(",") { (counts[it] ?: 0).toString() }}")
-            teamsOut.println("$time,${teamComputers.joinToString(",") { topTool[it]?.name ?: "--" }}")
+            teamsOut.println("$time,${teams.joinToString(",") { topTool[it]?.name ?: "--" }}")
         }
 
-        val usage = teamComputerUsage.toList()
-            .flatMap { (tc, list) -> list.map { tc to it } }
-            .sortedBy { it.second.time }
-        for ((tc, u) in usage) {
-            val interval = u.time / INTERVAL
-            if (interval != curInterval) {
+        for (u in usage) {
+            val i = u.time / INTERVAL
+            if (i != cur) {
                 flushInterval()
-                curInterval = interval
+                cur = i
             }
-            val a = teamTools.getOrPut(tc) { DoubleArray(TOOLS.size) }
+            val a = teamTools.getOrPut(u.team) { DoubleArray(TOOLS.size) }
             a[u.tool.ordinal] += u.cpu
         }
         flushInterval()
     }
 
-/*
-    // analyze accepted runs
-    val eventFeed = EventFeed(eventFeedFile)
+    // analyze accepted runs and write unexpected tools / submissions
     val langToolCountSubmitted = HashMap<Language, IntArray>()
     val langToolCountAccepted = HashMap<Language, IntArray>()
-    for (submission in eventFeed.submissions.values) {
-        val internal = submission.time / (INTERVAL * 1000)
-        val teamTopTool = intervalTeamComputerTopTool[internal] ?: continue // time out of range
-        val tool = teamTopTool["team${submission.teamId}"] ?: Tool.Unknown
-        val subCount = langToolCountSubmitted.getOrPut(submission.language) { IntArray(TOOLS_WITH_UNKNOWN.size) }
-        subCount[tool.ordinal]++
-        if (submission.accepted) {
-            val accCount = langToolCountAccepted.getOrPut(submission.language) { IntArray(TOOLS_WITH_UNKNOWN.size) }
-            accCount[tool.ordinal]++
+    scope {
+        val out = writeFile(UNEXPECTED_SUBMISSION_TOOLS_FILE)
+        out.println("TIME,TEAM,LANGUAGE,TOOL")
+        for (submission in eventFeed.submissions.values) {
+            val interval = submission.time / (INTERVAL * 1000L)
+            val teamTopTool = intervalTeamTopTool[interval] ?: continue // time out of range
+            val tool = teamTopTool[submission.teamId] ?: Tool.Unknown
+            if (submission.language !in tool.languages) {
+                out.println("${submission.time / 1000L},${submission.teamId},${submission.language},$tool")
+            }
+            val subCount = langToolCountSubmitted.getOrPut(submission.language) { IntArray(TOOLS_WITH_UNKNOWN.size) }
+            subCount[tool.ordinal]++
+            if (submission.accepted) {
+                val accCount = langToolCountAccepted.getOrPut(submission.language) { IntArray(TOOLS_WITH_UNKNOWN.size) }
+                accCount[tool.ordinal]++
+            }
         }
     }
-    println("Writing $LANGS_SUBMITTED_FILE and $LANGS_ACCEPTED_FILE")
+
     scope {
         val subOut = writeFile(LANGS_SUBMITTED_FILE)
         val accOut = writeFile(LANGS_ACCEPTED_FILE)
@@ -215,15 +212,13 @@ fun main(args: Array<String>) {
         }
     }
 
-    // todo:
-    println("Writing $TEAMS_NAME_FILE")
     scope {
         val out = writeFile(TEAMS_NAME_FILE)
+        out.println("TEAM,NAME")
         for (team in teams) {
-            out.println(team)
+            out.println("$team,${eventFeed.teams[team]}")
         }
     }
-*/
 }
 
 class DeferScope {
@@ -247,7 +242,8 @@ inline fun scope(block: DeferScope.() -> Unit) {
     }
 }
 
-fun DeferScope.writeFile(fileName: String): PrintWriter =
-    File(fileName).printWriter().also { defer { it.close() } }.also {
-        println("Writing $fileName")
-    }
+fun DeferScope.writeFile(fileName: String): PrintWriter {
+    val file = File(RESULT_DIR, fileName)
+    println("Writing $file ...")
+    return file.printWriter().also { defer { it.close() } }
+}

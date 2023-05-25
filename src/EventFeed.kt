@@ -17,36 +17,57 @@ class EventFeed(fileName: String) {
         file.forEachLine l@{ line ->
             val obj = parser.parse(line) as? JsonObject ?: return@l
             val type = obj["type"]?.asString
-            val op = obj["op"]?.asString
             val data = obj["data"].asJsonObject
             when (type) {
                 "teams" -> {
-                    // {"id":"278881","type":"teams","op":"create",
-                    //     "data":{"externalid":"404709","group_ids":["13858"],
-                    //     "affiliation":"University of Ni\u0161 - Faculty of Sciences and Mathematics",
-                    //     "id":"118",
-                    //     "icpc_id":"404709",
-                    //     "name":"University of Ni\u0161 - Faculty of Sciences and Mathematics",
-                    //     "organization_id":"4234","members":null},
-                    //     "time":"2019-04-03T18:55:18.392+01:00"
+                    // {
+                    //  "token": "145511",
+                    //  "id": "1",
+                    //  "type": "teams",
+                    //  "data": {
+                    //    "organization_id": "7790",
+                    //    "hidden": false,
+                    //    "group_ids": [
+                    //      "17106"
+                    //    ],
+                    //    "affiliation": "Adama Science and Technology University",
+                    //    "id": "1",
+                    //    "icpc_id": "697451",
+                    //    "name": "Andalus",
+                    //    "display_name": "Adama Science and Technology University",
+                    //    "public_description": null,
+                    //    "photo": [...]
+                    //  },
+                    //  "time": "2022-11-09T19:20:15.057+06:00"
                     // }
-                    if (op != "create") return@l
                     val id = data["id"].asString
                     val name = data["name"].asString
                     teams[id] = name
                 }
                 "submissions" -> {
-                    // {"id":"316201","type":"submissions","op":"create",
-                    //   "data":{"language_id":"cpp","time":"2019-04-04T15:21:39.034+01:00",
-                    //   "contest_time":"3:31:14.034","id":"11769","externalid":null,"team_id":"75",
-                    //   "problem_id":"circular","entry_point":null,
-                    //   "files":[{"href":"contests/finals/submissions/11769/files","mime":"application/zip"}]},
-                    //   "time":"2019-04-04T15:21:39.044+01:00"
+                    // {
+                    //  "token": "145665",
+                    //  "id": "3506",
+                    //  "type": "submissions",
+                    //  "data": {
+                    //    "language_id": "java",
+                    //    "time": "2022-11-09T19:20:15.078+06:00",
+                    //    "contest_time": "-15:39:44.921",
+                    //    "team_id": "tobi",
+                    //    "problem_id": "cross",
+                    //    "id": "3506",
+                    //    "external_id": null,
+                    //    "entry_point": null,
+                    //    "files": [...]
+                    //  },
+                    //  "time": "2022-11-09T19:20:15.090+06:00"
                     // }
-                    if (op != "create") return@l
                     val id = data["id"].asString
                     val languageId = data["language_id"].asString
-                    val language = LANGUAGES.firstOrNull { languageId.startsWith(it.prefix) } ?: return@l
+                    val language = LANGUAGES.firstOrNull { languageId.startsWith(it.prefix) } ?: run {
+                        println("!!! Unknown language: $languageId in run $id")
+                        return@l
+                    }
                     submissions[id] = Submission(
                         id = id,
                         teamId = data["team_id"].asString,
@@ -56,18 +77,22 @@ class EventFeed(fileName: String) {
                     )
                 }
                 "judgements" -> {
-                    // {"id":"316202","type":"judgements","op":"create",
-                    //   "data":{"max_run_time":null,"start_time":"2019-04-04T15:21:39.257+01:00",
-                    //   "start_contest_time":"3:31:14.257","end_time":null,"end_contest_time":null,
-                    //   "id":"18469","submission_id":"11769","valid":true,
-                    //   "judgehost":"domjudge-judgehost3-0","judgement_type_id":null},
-                    //   "time":"2019-04-04T15:21:39.263+01:00"}
-                    // {"id":"316220","type":"judgements","op":"update",
-                    //   "data":{"max_run_time":0.148,"start_time":"2019-04-04T15:21:39.257+01:00",
-                    //   "start_contest_time":"3:31:14.257","end_time":"2019-04-04T15:21:44.707+01:00","end_contest_time":"3:31:19.707",
-                    //   "id":"18469","submission_id":"11769","valid":true,
-                    //   "judgehost":"domjudge-judgehost3-0","judgement_type_id":"WA"},
-                    //   "time":"2019-04-04T15:21:44.718+01:00"
+                    // {
+                    //  "token": "145983",
+                    //  "id": "3663",
+                    //  "type": "judgements",
+                    //  "data": {
+                    //    "max_run_time": 0.533,
+                    //    "start_time": "2022-11-09T19:20:16.000+06:00",
+                    //    "start_contest_time": "-15:39:43.999",
+                    //    "end_time": "2022-11-09T19:20:23.805+06:00",
+                    //    "end_contest_time": "-15:39:36.194",
+                    //    "submission_id": "3508",
+                    //    "id": "3663",
+                    //    "valid": true,
+                    //    "judgement_type_id": "AC"
+                    //  },
+                    //  "time": "2022-11-09T19:20:23.820+06:00"
                     // }
                     val verdict = data["judgement_type_id"]
                     if (verdict !is JsonPrimitive || verdict.asString != "AC") return@l
@@ -81,7 +106,15 @@ class EventFeed(fileName: String) {
                 }
             }
         }
+        // report summary
+        println("${teams.size} teams found")
         println("${submissions.size} submissions found, $nAccepted accepted")
+        println("Team ids: ${teams.keys.sortedBy { it.teamIdSortKey() }}")
+        val allTimes = submissions.values.map { it.time / 1000 }
+        println("Submissions time range (seconds from epoch):")
+        println("  Min: ${allTimes.min()}")
+        println("  Max: ${allTimes.max()}")
+
     }
 }
 
@@ -107,6 +140,8 @@ enum class Language(val prefix: String) {
 }
 
 val LANGUAGES = Language.values().toList()
+
+fun String.teamIdSortKey() = padStart(3, '0')
 
 fun main(args: Array<String>) {
     EventFeed(args[0])
